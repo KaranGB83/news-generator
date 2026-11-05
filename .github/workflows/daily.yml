@@ -1,0 +1,23 @@
+name: Daily news run
+
+on:
+  schedule:
+    - cron: "30 1 * * *" # 07:00 IST (GitHub cron runs in UTC)
+  workflow_dispatch: # manual "Run workflow" button
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger news generation
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          # Retries cover Render's free-tier cold start (first request can 502/503 or time out).
+          curl --fail-with-body --silent --show-error \
+            --max-time 600 \
+            --retry 5 --retry-delay 30 --retry-max-time 300 --retry-connrefused \
+            -X POST "${APP_URL%/}/jobs/run" \
+            -H "X-API-Key: $API_KEY"
