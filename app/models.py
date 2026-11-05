@@ -79,6 +79,8 @@ class Article(Base):
             "post_date",
             unique=True,
             postgresql_where=text("status = 'posted'"),
+            # Ignored by Postgres; lets the test suite run on SQLite with the same rule.
+            sqlite_where=text("status = 'posted'"),
         ),
         Index("ix_articles_run_id", "run_id"),
     )
