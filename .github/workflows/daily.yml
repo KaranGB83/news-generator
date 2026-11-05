@@ -19,5 +19,5 @@ jobs:
           curl --fail-with-body --silent --show-error \
             --max-time 600 \
             --retry 5 --retry-delay 30 --retry-max-time 300 --retry-connrefused \
-            -X POST "${APP_URL%/}/jobs/run" \
+            -X POST "${APP_URL%/}/jobs/run?source=github-actions" \
             -H "X-API-Key: $API_KEY"
