@@ -27,6 +27,12 @@ KBNEWS_CATEGORY = {
 # After an ambiguous failure, a post with the same title created this recently counts as ours.
 RECENT_POST_WINDOW = timedelta(minutes=15)
 
+# Identifies this service to whatever sits in front of kbNews; the default python-httpx agent is
+# the kind of client edge filters tend to throttle.
+USER_AGENT = "news-generator/1.0"
+# Longest we will wait because a server asked us to (Retry-After).
+MAX_RETRY_AFTER_SECONDS = 60.0
+
 
 def kbnews_category(category: Category) -> str:
     return KBNEWS_CATEGORY.get(category, "General")
@@ -53,10 +59,13 @@ class KbNewsPost:
 class _Transient(Exception):
     """A retryable failure. `ambiguous` means the server may have processed the request anyway."""
 
-    def __init__(self, reason: str, *, ambiguous: bool) -> None:
+    def __init__(
+        self, reason: str, *, ambiguous: bool, retry_after: float | None = None
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.ambiguous = ambiguous
+        self.retry_after = retry_after
 
 
 class KbNewsClient:
@@ -75,6 +84,7 @@ class KbNewsClient:
         client: httpx.AsyncClient | None = None,
         max_retries: int = 4,
         backoff_seconds: float = 5.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         settings = get_settings()
         self._email = email if email is not None else settings.kbnews_bot_email
@@ -86,6 +96,7 @@ class KbNewsClient:
         self._owns_client = client is None
         self._max_retries = max_retries
         self._backoff = backoff_seconds
+        self._sleep = sleep
         self._logged_in = False
 
     async def aclose(self) -> None:
@@ -195,8 +206,11 @@ class KbNewsClient:
 
     async def _attempt(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """One HTTP call; converts retryable failures into `_Transient`."""
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("User-Agent", USER_AGENT)
+        headers.setdefault("Accept", "application/json")
         try:
-            response = await self._client.request(method, path, **kwargs)
+            response = await self._client.request(method, path, headers=headers, **kwargs)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             # Never reached the server, so repeating cannot duplicate anything.
             raise _Transient(f"could not connect: {exc!r}", ambiguous=False) from exc
@@ -206,11 +220,16 @@ class KbNewsClient:
 
         status = response.status_code
         if status in (429, 500):
-            # 429 is the rate limiter; kbNews returns 500 before saving anything.
-            raise _Transient(f"HTTP {status}: {_message(response)}", ambiguous=False)
+            # 429 is a rate limiter (kbNews's own, or one in front of it); kbNews returns 500
+            # before saving anything. The origin note shows which layer produced the answer.
+            raise _Transient(
+                f"HTTP {status}: {_message(response)} [{_origin(response)}]",
+                ambiguous=False,
+                retry_after=_retry_after(response),
+            )
         if status in (502, 503, 504):
             # Render's proxy while the free instance wakes up, or a gateway timeout.
-            raise _Transient(f"HTTP {status}", ambiguous=True)
+            raise _Transient(f"HTTP {status} [{_origin(response)}]", ambiguous=True)
         return response
 
     async def _retrying(
@@ -222,10 +241,12 @@ class KbNewsClient:
     ) -> T:
         last_reason = "unknown error"
         for number in range(self._max_retries + 1):
+            retry_after: float | None = None
             try:
                 return await attempt()
             except _Transient as exc:
                 last_reason = exc.reason
+                retry_after = exc.retry_after
                 if exc.ambiguous and recover is not None:
                     found = await recover()
                     if found is not None:
@@ -233,8 +254,11 @@ class KbNewsClient:
                         return found
             if number < self._max_retries:
                 delay = self._backoff * (2**number)
+                if retry_after:
+                    # The server told us how long to wait; never retry sooner, but cap the wait.
+                    delay = max(delay, min(retry_after, MAX_RETRY_AFTER_SECONDS))
                 logger.warning("kbNews %s failed (%s); retrying in %.1fs", what, last_reason, delay)
-                await asyncio.sleep(delay)
+                await self._sleep(delay)
         raise KbNewsError(f"kbNews {what} failed after retries: {last_reason}")
 
 
@@ -251,6 +275,26 @@ def _multipart(
     if image is not None:
         parts.append(("coverImage", (image.filename, image.content, image.content_type)))
     return parts
+
+
+def _origin(response: httpx.Response) -> str:
+    """Which layer answered. kbNews's Express app always sends `x-powered-by: Express`, so if it
+    is absent the response came from a proxy or edge in front of the app."""
+    headers = response.headers
+    return (
+        f"x-powered-by={headers.get('x-powered-by', 'absent')}, "
+        f"server={headers.get('server', 'unknown')}"
+    )
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds from a numeric Retry-After header (HTTP-date form is ignored)."""
+    value = response.headers.get("retry-after", "").strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
 
 
 def _message(response: httpx.Response) -> str:
