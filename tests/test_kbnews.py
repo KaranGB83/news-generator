@@ -268,3 +268,102 @@ def test_category_mapping_uses_values_the_kbnews_ui_offers():
     assert kbnews_category(Category.WORLD) == "World"
     assert kbnews_category(Category.INDIA) == "General"
     assert kbnews_category(Category.MAHARASHTRA) == "General"
+
+
+class SleepRecorder:
+    def __init__(self):
+        self.delays: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.delays.append(seconds)
+
+
+async def test_every_request_identifies_the_service():
+    fake = FakeKbNews()
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake).create_news(title="T", content="C")
+
+    assert len(fake.calls) == 2
+    for request in fake.calls:
+        assert request.headers["user-agent"] == "news-generator/1.0"
+        assert request.headers["accept"] == "application/json"
+
+
+async def test_retry_after_is_honoured_when_longer_than_backoff():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, headers={"retry-after": "7"}), login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=sleeper).create_news(title="T", content="C")
+
+    assert sleeper.delays == [7.0]
+
+
+async def test_retry_after_never_shortens_the_backoff():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, headers={"retry-after": "2"}), login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=sleeper, backoff_seconds=10).create_news(title="T", content="C")
+
+    assert sleeper.delays == [10.0]
+
+
+async def test_retry_after_is_capped_at_one_minute():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, headers={"retry-after": "3600"}), login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=sleeper).create_news(title="T", content="C")
+
+    assert sleeper.delays == [60.0]
+
+
+async def test_unparseable_retry_after_is_ignored():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    date = "Wed, 21 Oct 2026 07:28:00 GMT"
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, headers={"retry-after": date}), login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=sleeper, backoff_seconds=3).create_news(title="T", content="C")
+
+    assert sleeper.delays == [3.0]
+
+
+async def test_login_429_from_an_edge_proxy_is_named_in_the_error():
+    # The shape seen in production: plain-text 429 with no x-powered-by header.
+    fake = FakeKbNews()
+    fake.queue(
+        "POST", "/api/auth/login",
+        httpx.Response(429, text="Too Many Requests", headers={"server": "cloudflare"}),
+    )
+
+    with pytest.raises(KbNewsError) as excinfo:
+        await make(fake, max_retries=2).create_news(title="T", content="C")
+
+    message = str(excinfo.value)
+    assert "login failed after retries" in message
+    assert "HTTP 429: Too Many Requests" in message
+    assert "x-powered-by=absent, server=cloudflare" in message
+    assert fake.count("POST", "/api/auth/login") == 3
+
+
+async def test_429_from_kbnews_itself_is_named_as_express():
+    fake = FakeKbNews()
+    fake.queue(
+        "POST", "/api/auth/login",
+        httpx.Response(
+            429,
+            json={"message": "Too many requests. Please try again later."},
+            headers={"x-powered-by": "Express"},
+        ),
+    )
+
+    with pytest.raises(KbNewsError, match="x-powered-by=Express"):
+        await make(fake, max_retries=1).create_news(title="T", content="C")
