@@ -26,3 +26,12 @@ class GNewsArticle(BaseModel):
     published_at: datetime | None = Field(default=None, alias="publishedAt")
     lang: str | None = None
     source: GNewsSource = Field(default_factory=GNewsSource)
+
+
+class GeneratedArticle(BaseModel):
+    """What Gemini returns when asked to write a post from a source article."""
+
+    skip: bool = False
+    skip_reason: str | None = None
+    title: str = ""
+    body: str = ""
