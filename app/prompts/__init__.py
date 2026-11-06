@@ -11,7 +11,7 @@ SYSTEM_INSTRUCTION = (
 
 TITLE_MAX_CHARS = 110
 BODY_MIN_WORDS = 40
-BODY_TARGET_WORDS = "120 to 200"
+BODY_TARGET_WORDS = "60 to 200"
 
 
 @dataclass(frozen=True)
@@ -52,8 +52,9 @@ def build_prompt(config: CategoryConfig, article: GNewsArticle, source_text: str
         "- Neutral, factual tone. No clickbait, no opinion, no emojis, no markdown.\n"
         "- Do not mention 'the article', 'the source text' or these rules.\n"
         f"- Title: at most {TITLE_MAX_CHARS} characters, specific and informative.\n"
-        f"- Body: plain text, {BODY_TARGET_WORDS} words, 2 to 4 short paragraphs separated by a blank "
-        "line.\n"
+        f"- Body: plain text, {BODY_TARGET_WORDS} words, 1 to 4 short paragraphs separated by a "
+        "blank line. Use as many words as the source supports and no more: if it supports only "
+        "about 60 words, write about 60. Never pad with background or guesses to reach a length.\n"
         f"{config.extra_rules}"
         "- Set \"skip\" to true, with a short \"skip_reason\" in English, if the source text is too "
         "thin or unclear to write an accurate post, is mostly boilerplate, an advertisement, a "

@@ -202,3 +202,12 @@ def test_attribution_english_and_marathi_and_missing_name():
     )
     assert with_attribution("मजकूर", "उदाहरण", "https://e.com/a", "mr").startswith("मजकूर\n\nस्रोत: उदाहरण")
     assert with_attribution("Body", None, "https://e.com/a", "en").endswith("Source: https://e.com/a")
+
+
+def test_prompt_lets_thin_sources_produce_shorter_posts():
+    # A live run skipped a usable story because the prompt demanded 120+ words.
+    article = source()
+    prompt = build_prompt(CATEGORY_CONFIGS[Category.WORLD], article, build_source_text(article))
+    assert "60 to 200 words" in prompt
+    assert "120" not in prompt
+    assert "Never pad" in prompt
