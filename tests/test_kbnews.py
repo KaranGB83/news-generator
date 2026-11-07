@@ -55,7 +55,8 @@ def make(fake: FakeKbNews, **kwargs) -> KbNewsClient:
     http = httpx.AsyncClient(
         base_url="https://kbnews.test", transport=httpx.MockTransport(fake.handler)
     )
-    defaults = dict(max_retries=3, backoff_seconds=0)
+    # Warm-up is off by default so these tests only see the calls they queue.
+    defaults = dict(max_retries=3, backoff_seconds=0, warm_up_attempts=0)
     return KbNewsClient("https://kbnews.test", "bot@example.com", "pw", client=http, **{**defaults, **kwargs})
 
 
@@ -367,3 +368,96 @@ async def test_429_from_kbnews_itself_is_named_as_express():
 
     with pytest.raises(KbNewsError, match="x-powered-by=Express"):
         await make(fake, max_retries=1).create_news(title="T", content="C")
+
+
+async def test_warm_up_waits_until_kbnews_answers_before_logging_in():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("GET", "/", httpx.Response(429), httpx.Response(503), httpx.Response(200, text="<html>"))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    client = make(fake, sleep=sleeper, warm_up_attempts=6, warm_up_interval=15.0)
+    post = await client.create_news(title="T", content="C")
+
+    assert post.id == "abc123"
+    assert fake.count("GET", "/") == 3
+    assert sleeper.delays == [15.0, 15.0]
+    order = [(r.method, r.url.path) for r in fake.calls]
+    assert order == [
+        ("GET", "/"), ("GET", "/"), ("GET", "/"),
+        ("POST", "/api/auth/login"), ("POST", "/api/news"),
+    ]
+    assert fake.calls[0].headers["user-agent"] == "news-generator/1.0"
+
+
+async def test_warm_up_stops_at_once_when_kbnews_is_already_awake():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("GET", "/", httpx.Response(200, text="<html>"))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=sleeper, warm_up_attempts=6).create_news(title="T", content="C")
+
+    assert fake.count("GET", "/") == 1
+    assert sleeper.delays == []
+
+
+async def test_warm_up_treats_connection_errors_as_not_ready():
+    fake = FakeKbNews()
+    fake.queue("GET", "/", httpx.ConnectError("refused"), httpx.Response(200, text="<html>"))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    await make(fake, sleep=SleepRecorder(), warm_up_attempts=3).create_news(title="T", content="C")
+
+    assert fake.count("GET", "/") == 2
+
+
+async def test_warm_up_gives_up_but_still_tries_to_log_in():
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("GET", "/", httpx.Response(429, text="Too Many Requests"))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    post = await make(fake, sleep=sleeper, warm_up_attempts=3, warm_up_interval=15.0).create_news(
+        title="T", content="C"
+    )
+
+    assert post.id == "abc123"
+    assert fake.count("GET", "/") == 3
+    assert sleeper.delays == [15.0, 15.0]  # no pointless wait after the last attempt
+
+
+async def test_failed_login_makes_later_posts_fail_fast_without_more_login_attempts():
+    fake = FakeKbNews()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, text="Too Many Requests"))
+    client = make(fake, max_retries=2)
+
+    with pytest.raises(KbNewsError, match="login failed after retries"):
+        await client.create_news(title="First", content="C")
+    attempts_after_first = fake.count("POST", "/api/auth/login")
+    assert attempts_after_first == 3
+
+    with pytest.raises(KbNewsError, match="already failed in this run"):
+        await client.create_news(title="Second", content="C")
+    with pytest.raises(KbNewsError, match="already failed in this run"):
+        await client.create_news(title="Third", content="C")
+
+    assert fake.count("POST", "/api/auth/login") == attempts_after_first
+    assert fake.count("POST", "/api/news") == 0
+
+
+async def test_rejected_credentials_also_fail_later_posts_fast():
+    fake = FakeKbNews()
+    fake.queue("POST", "/api/auth/login", httpx.Response(400, json={"message": "Invalid credentials"}))
+    client = make(fake)
+
+    with pytest.raises(KbNewsAuthError):
+        await client.create_news(title="A", content="C")
+    with pytest.raises(KbNewsError, match="Invalid credentials"):
+        await client.create_news(title="B", content="C")
+
+    assert fake.count("POST", "/api/auth/login") == 1

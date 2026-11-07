@@ -33,6 +33,12 @@ USER_AGENT = "news-generator/1.0"
 # Longest we will wait because a server asked us to (Retry-After).
 MAX_RETRY_AFTER_SECONDS = 60.0
 
+# Responses that mean "not ready yet" while a sleeping Render instance wakes up (about a minute).
+NOT_READY_STATUS = {429, 500, 502, 503, 504}
+WARM_UP_ATTEMPTS = 6
+WARM_UP_INTERVAL_SECONDS = 15.0
+WARM_UP_REQUEST_TIMEOUT = 30.0
+
 
 def kbnews_category(category: Category) -> str:
     return KBNEWS_CATEGORY.get(category, "General")
@@ -85,6 +91,8 @@ class KbNewsClient:
         max_retries: int = 4,
         backoff_seconds: float = 5.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        warm_up_attempts: int = WARM_UP_ATTEMPTS,
+        warm_up_interval: float = WARM_UP_INTERVAL_SECONDS,
     ) -> None:
         settings = get_settings()
         self._email = email if email is not None else settings.kbnews_bot_email
@@ -97,7 +105,12 @@ class KbNewsClient:
         self._max_retries = max_retries
         self._backoff = backoff_seconds
         self._sleep = sleep
+        self._warm_up_attempts = warm_up_attempts
+        self._warm_up_interval = warm_up_interval
         self._logged_in = False
+        # Set when login fails, so later posts in the same run fail at once instead of repeating
+        # a full round of login attempts for every category.
+        self._unavailable: str | None = None
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -157,12 +170,48 @@ class KbNewsClient:
     # --- auth -------------------------------------------------------------------------------
 
     async def _ensure_login(self) -> None:
-        if not self._logged_in:
+        if self._logged_in:
+            return
+        if self._unavailable is not None:
+            raise KbNewsError(f"kbNews login already failed in this run: {self._unavailable}")
+        self._require_credentials()  # no point waking kbNews if we cannot log in anyway
+        try:
+            await self._warm_up()
             await self._login()
+        except KbNewsError as exc:
+            self._unavailable = str(exc)
+            raise
 
-    async def _login(self) -> None:
+    async def _warm_up(self) -> None:
+        """Wake kbNews if it is asleep, waiting until it answers normally.
+
+        A free Render instance takes about a minute to start, and the proxy in front of it can answer
+        with errors (including 429) meanwhile. Waiting here is gentler than burning the login retries.
+        If it never answers normally we still try to log in; the login has its own retries.
+        """
+        for number in range(self._warm_up_attempts):
+            try:
+                response = await self._client.get(
+                    "/", headers=_default_headers(), timeout=WARM_UP_REQUEST_TIMEOUT
+                )
+            except httpx.TransportError as exc:
+                state = repr(exc)
+            else:
+                if response.status_code not in NOT_READY_STATUS:
+                    return
+                state = f"HTTP {response.status_code} [{_origin(response)}]"
+            logger.info("kbNews not ready yet (%s)", state)
+            if number < self._warm_up_attempts - 1:
+                await self._sleep(self._warm_up_interval)
+        if self._warm_up_attempts:
+            logger.warning("kbNews still not answering normally after warm-up; trying to log in anyway")
+
+    def _require_credentials(self) -> None:
         if not self._email or not self._password:
             raise KbNewsAuthError("KBNEWS_BOT_EMAIL / KBNEWS_BOT_PASSWORD are not set")
+
+    async def _login(self) -> None:
+        self._require_credentials()
 
         async def attempt() -> None:
             response = await self._attempt(
@@ -206,9 +255,7 @@ class KbNewsClient:
 
     async def _attempt(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """One HTTP call; converts retryable failures into `_Transient`."""
-        headers = dict(kwargs.pop("headers", None) or {})
-        headers.setdefault("User-Agent", USER_AGENT)
-        headers.setdefault("Accept", "application/json")
+        headers = _default_headers(kwargs.pop("headers", None))
         try:
             response = await self._client.request(method, path, headers=headers, **kwargs)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
@@ -275,6 +322,13 @@ def _multipart(
     if image is not None:
         parts.append(("coverImage", (image.filename, image.content, image.content_type)))
     return parts
+
+
+def _default_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    headers = dict(extra or {})
+    headers.setdefault("User-Agent", USER_AGENT)
+    headers.setdefault("Accept", "application/json")
+    return headers
 
 
 def _origin(response: httpx.Response) -> str:
