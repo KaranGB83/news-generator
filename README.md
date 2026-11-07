@@ -129,8 +129,9 @@ Add two repository secrets (**Settings → Secrets and variables → Actions**):
 - `APP_URL`: the Render URL, no trailing slash
 - `API_KEY`: exactly the same value as on Render
 
-`.github/workflows/daily.yml` calls `/jobs/run` at 01:30 UTC (07:00 IST) and can also be started from
-**Actions → Daily news run → Run workflow**. Its curl retries cover Render's cold start. GitHub pauses
+`.github/workflows/daily.yml` calls `/jobs/run` three times a day (01:30, 05:30 and 09:30 UTC, which
+is 07:00, 11:00 and 15:00 IST) and can also be started from **Actions → Daily news run → Run
+workflow**. Only the first run normally does any work; the others publish whatever is still missing. Its curl retries cover Render's cold start. GitHub pauses
 scheduled workflows after 60 days without repository activity.
 
 ## Running the job by hand
@@ -170,6 +171,9 @@ select category, status, attempts, kbnews_post_id, error from articles order by 
 
 Article statuses: `selected`, `generated`, `posted`, `skipped` (with the reason in `error`), `failed`.
 
+Render's log shows each step (`Category world: posted`, retries, skips). Request URLs are deliberately not
+logged, because GNews takes its API key in the URL.
+
 ## Troubleshooting
 
 - **409 "run N is still in progress".** A run is active, or one was cut off by a redeploy and its row is
@@ -178,13 +182,16 @@ Article statuses: `selected`, `generated`, `posted`, `skipped` (with the reason 
 - **401 from `/jobs/run`.** The key in the request differs from `API_KEY` on Render. Look for a stray
   space or newline when pasting, and remember a changed variable only applies after Render redeploys.
 - **`kbNews login failed ... HTTP 429`.** The error text ends with `[x-powered-by=..., server=...]`.
-  `Express` means kbNews itself answered; `absent` means a proxy or edge in front of it did (kbNews's
-  own limiter replies with JSON, and its login route has none). Before logging in, the client wakes
-  kbNews with a patient warm-up (up to 6 checks, 15 s apart), sends a `news-generator/1.0` User-Agent,
-  honours `Retry-After`, and after one failed login it fails the remaining categories at once instead
-  of retrying for each. To find out whether kbNews was asleep or the request was blocked, look at the
-  kbNews service's Render logs for the same minute: no login request there means it never got past the
-  proxy. Avoid triggering repeated runs while investigating.
+  `absent` means a proxy in front of kbNews answered, not your Express app. If it also says
+  `cloudflare-challenge`, Cloudflare (which sits in front of every `onrender.com` site) is screening
+  this service's requests with a "Just a moment..." page that a script cannot solve. It comes and goes
+  with the reputation of Render's shared outgoing addresses, so a run that is blocked one hour can pass
+  a few hours later. That is why the workflow tries three times a day (07:00, 11:00, 15:00 IST); later
+  runs only do what is still missing. The client also wakes a sleeping kbNews with a patient warm-up
+  (it stops waiting when it sees a challenge), sends a `news-generator/1.0` User-Agent, honours
+  `Retry-After`, and after one failed login fails the other categories at once. To see whether
+  GitHub's network gets through, run **Actions → Check kbNews reachability**: `HTTP 400` in its log
+  means kbNews is reachable from there.
 - **A story was skipped.** Free-plan GNews returns truncated text, so some stories are too thin to write
   from. The reason is in `articles.error`; the pipeline moves on to the next candidate on its own.
 - **Slow first request.** Render's free instances sleep after about 15 minutes of silence and take up to a
@@ -203,6 +210,8 @@ Article statuses: `selected`, `generated`, `posted`, `skipped` (with the reason 
 
 ## Ideas for later
 
+- Run the pipeline inside the GitHub Actions job instead of on Render, if Cloudflare keeps blocking
+  Render's outgoing addresses (the reachability workflow shows whether GitHub's network is let through).
 - An admin page showing runs, articles, errors and a retry button (the tables already hold the data).
 - Feed recently posted headlines to the picker so it avoids repeating a running story.
 - Dedicated India and Maharashtra categories in kbNews.
