@@ -178,9 +178,13 @@ Article statuses: `selected`, `generated`, `posted`, `skipped` (with the reason 
 - **401 from `/jobs/run`.** The key in the request differs from `API_KEY` on Render. Look for a stray
   space or newline when pasting, and remember a changed variable only applies after Render redeploys.
 - **`kbNews login failed ... HTTP 429`.** The error text ends with `[x-powered-by=..., server=...]`.
-  `Express` means kbNews itself answered; `absent` means a proxy or edge in front of it did. Requests send
-  a `news-generator/1.0` User-Agent and honour `Retry-After`. Avoid triggering repeated runs while
-  investigating.
+  `Express` means kbNews itself answered; `absent` means a proxy or edge in front of it did (kbNews's
+  own limiter replies with JSON, and its login route has none). Before logging in, the client wakes
+  kbNews with a patient warm-up (up to 6 checks, 15 s apart), sends a `news-generator/1.0` User-Agent,
+  honours `Retry-After`, and after one failed login it fails the remaining categories at once instead
+  of retrying for each. To find out whether kbNews was asleep or the request was blocked, look at the
+  kbNews service's Render logs for the same minute: no login request there means it never got past the
+  proxy. Avoid triggering repeated runs while investigating.
 - **A story was skipped.** Free-plan GNews returns truncated text, so some stories are too thin to write
   from. The reason is in `articles.error`; the pipeline moves on to the next candidate on its own.
 - **Slow first request.** Render's free instances sleep after about 15 minutes of silence and take up to a
