@@ -197,6 +197,14 @@ class KbNewsClient:
             except httpx.TransportError as exc:
                 state = repr(exc)
             else:
+                if _is_cloudflare_challenge(response):
+                    # A challenge page is Cloudflare screening this client, not kbNews waking up,
+                    # so waiting here will not change the outcome.
+                    logger.warning(
+                        "kbNews answered with a Cloudflare challenge (HTTP %s); skipping warm-up",
+                        response.status_code,
+                    )
+                    return
                 if response.status_code not in NOT_READY_STATUS:
                     return
                 state = f"HTTP {response.status_code} [{_origin(response)}]"
@@ -335,10 +343,19 @@ def _origin(response: httpx.Response) -> str:
     """Which layer answered. kbNews's Express app always sends `x-powered-by: Express`, so if it
     is absent the response came from a proxy or edge in front of the app."""
     headers = response.headers
-    return (
+    note = (
         f"x-powered-by={headers.get('x-powered-by', 'absent')}, "
         f"server={headers.get('server', 'unknown')}"
     )
+    return f"{note}, cloudflare-challenge" if _is_cloudflare_challenge(response) else note
+
+
+def _is_cloudflare_challenge(response: httpx.Response) -> bool:
+    """Cloudflare's bot screening answers with a "Just a moment..." page (and usually a
+    `cf-mitigated: challenge` header). A script cannot solve it."""
+    if response.headers.get("cf-mitigated", "").lower() == "challenge":
+        return True
+    return "<title>Just a moment...</title>" in response.text[:3000]
 
 
 def _retry_after(response: httpx.Response) -> float | None:

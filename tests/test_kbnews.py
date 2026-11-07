@@ -461,3 +461,54 @@ async def test_rejected_credentials_also_fail_later_posts_fast():
         await client.create_news(title="B", content="C")
 
     assert fake.count("POST", "/api/auth/login") == 1
+
+
+CHALLENGE_PAGE = (
+    '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head>'
+    "<body>Enable JavaScript and cookies to continue</body></html>"
+)
+
+
+async def test_warm_up_does_not_wait_when_cloudflare_is_challenging():
+    # Seen live on 7 Nov: the proxy answered 429 with a "Just a moment..." page, so waiting is futile.
+    fake = FakeKbNews()
+    sleeper = SleepRecorder()
+    fake.queue("GET", "/", httpx.Response(429, text=CHALLENGE_PAGE, headers={"server": "cloudflare"}))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+
+    post = await make(fake, sleep=sleeper, warm_up_attempts=6).create_news(title="T", content="C")
+
+    assert post.id == "abc123"
+    assert fake.count("GET", "/") == 1
+    assert sleeper.delays == []
+
+
+async def test_challenge_detected_from_header_even_with_a_different_status():
+    fake = FakeKbNews()
+    fake.queue("GET", "/", httpx.Response(403, text="blocked", headers={"cf-mitigated": "challenge"}))
+    fake.queue("POST", "/api/auth/login", login_ok())
+    fake.queue("POST", "/api/news", created())
+    sleeper = SleepRecorder()
+
+    await make(fake, sleep=sleeper, warm_up_attempts=6).create_news(title="T", content="C")
+
+    assert fake.count("GET", "/") == 1 and sleeper.delays == []
+
+
+async def test_challenge_is_named_in_the_login_error():
+    fake = FakeKbNews()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, text=CHALLENGE_PAGE, headers={"server": "cloudflare"}))
+
+    with pytest.raises(KbNewsError, match="cloudflare-challenge"):
+        await make(fake, max_retries=1).create_news(title="T", content="C")
+
+
+async def test_plain_429_is_not_mistaken_for_a_challenge():
+    fake = FakeKbNews()
+    fake.queue("POST", "/api/auth/login", httpx.Response(429, text="Too Many Requests"))
+
+    with pytest.raises(KbNewsError) as excinfo:
+        await make(fake, max_retries=1).create_news(title="T", content="C")
+
+    assert "cloudflare-challenge" not in str(excinfo.value)
