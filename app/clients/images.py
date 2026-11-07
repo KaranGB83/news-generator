@@ -11,9 +11,11 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 15.0
 
 # Some publishers block unknown clients; a generic browser-style agent avoids most of that.
+# Accept lists only formats we can recognise and kbNews's frontend can show. Offering AVIF made
+# image CDNs (Times of India, Economic Times) serve AVIF, which was then rejected as unsupported.
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; news-generator/0.1)",
-    "Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
+    "Accept": "image/jpeg,image/png,image/gif;q=0.9,image/webp;q=0.8,*/*;q=0.1",
 }
 
 
@@ -54,11 +56,10 @@ async def download_image(
         return None
 
     owns_client = client is None
-    http = client or httpx.AsyncClient(
-        timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, headers=_HEADERS
-    )
+    http = client or httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True)
     try:
-        async with http.stream("GET", url) as response:
+        # Headers go on the request, not the client, so an injected client gets them too.
+        async with http.stream("GET", url, headers=_HEADERS) as response:
             if response.status_code != 200:
                 logger.info("Image download %s returned HTTP %s", url, response.status_code)
                 return None
@@ -83,7 +84,9 @@ async def download_image(
 
     sniffed = sniff_image_type(bytes(data))
     if sniffed is None:
-        logger.info("Image %s is not a supported image type", url)
+        logger.info(
+            "Image %s is not a supported image type (first bytes: %r)", url, bytes(data[:12])
+        )
         return None
     content_type, extension = sniffed
     return DownloadedImage(bytes(data), content_type, f"cover.{extension}")

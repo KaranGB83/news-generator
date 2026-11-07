@@ -81,3 +81,32 @@ async def test_bad_or_missing_url_returns_none_without_requesting():
     assert await download_image("", client=client) is None
     assert await download_image("file:///etc/passwd", client=client) is None
     assert await download_image("ftp://example.com/a.png", client=client) is None
+
+
+async def test_request_does_not_offer_avif_and_sends_a_user_agent():
+    # Offering AVIF made image CDNs return AVIF, which we then rejected (live logs, 7 Nov).
+    seen = {}
+
+    def handler(request):
+        seen["accept"] = request.headers["accept"]
+        seen["agent"] = request.headers["user-agent"]
+        return httpx.Response(200, content=PNG)
+
+    await download_image("https://img.example.com/a", client=client_for(handler))
+
+    assert "avif" not in seen["accept"].lower()
+    assert "image/jpeg" in seen["accept"] and "image/png" in seen["accept"]
+    assert seen["agent"].startswith("Mozilla/5.0")
+
+
+async def test_unsupported_image_logs_its_first_bytes(caplog):
+    avif = b"\x00\x00\x00\x1cftypavif" + b"\x00" * 16
+
+    def handler(request):
+        return httpx.Response(200, content=avif, headers={"content-type": "image/avif"})
+
+    with caplog.at_level("INFO", logger="app.clients.images"):
+        result = await download_image("https://img.example.com/a", client=client_for(handler))
+
+    assert result is None
+    assert "ftypavif" in caplog.text
