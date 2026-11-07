@@ -1,0 +1,26 @@
+name: Check kbNews reachability
+
+# Manual only. Tells you whether kbNews's proxy lets requests from GitHub's network through, which
+# helps decide where the daily job should run. Sends no real credentials.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe the kbNews login endpoint three times
+        run: |
+          # A healthy kbNews answers 400 ("Invalid credentials") to these made-up credentials.
+          # HTTP 429/403 or a "Just a moment..." page means Cloudflare is challenging this network.
+          for attempt in 1 2 3; do
+            echo "--- attempt $attempt"
+            curl -sS --max-time 90 -o body.txt -w "HTTP %{http_code}\n" \
+              -A "news-generator/1.0" \
+              -X POST "https://kbnews.onrender.com/api/auth/login" \
+              -H "Content-Type: application/json" \
+              -d '{"email":"probe@example.invalid","password":"not-a-real-password"}' || true
+            head -c 300 body.txt; echo
+            sleep 20
+          done
