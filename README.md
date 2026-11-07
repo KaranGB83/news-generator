@@ -10,14 +10,14 @@ through a bot account:
 | `india` | GNews top headlines (country `in`) | English |
 | `maharashtra` | GNews search: Maharashtra, Mumbai, Pune, Nagpur | Marathi |
 
-**Stack:** FastAPI, PostgreSQL (Supabase), SQLAlchemy + Alembic, httpx, Docker. Hosted on Render's
-free tier and triggered daily by a GitHub Actions workflow.
+**Stack:** FastAPI, PostgreSQL (Supabase), SQLAlchemy + Alembic, httpx, Docker. The scheduled job runs on a
+GitHub Actions runner; the FastAPI service on Render offers the same pipeline over HTTP.
 
 ## How a run works
 
 ```
-GitHub Actions (07:00 IST)
-        |  POST /jobs/run  (X-API-Key)
+GitHub Actions (07:00, 11:00, 15:00 IST) runs `python -m app.cli run`
+        |   (the same pipeline is also served by POST /jobs/run on Render)
         v
   for each category:
     already posted today?  -> skip
@@ -47,6 +47,7 @@ Things worth knowing:
 app/
   main.py               FastAPI app, /health
   api/jobs.py           POST /jobs/run (API-key protected)
+  cli.py                python -m app.cli run (what the schedule uses)
   config.py             settings from environment
   db.py, models.py      async engine (Supabase pooler safe), Run and Article tables
   schemas.py            GNews and Gemini data shapes
@@ -63,7 +64,8 @@ app/
     repository.py       database access
 alembic/                migrations
 tests/                  pytest suite (no network, SQLite)
-.github/workflows/daily.yml
+.github/workflows/daily.yml        scheduled run (python -m app.cli)
+.github/workflows/trigger-render.yml, kbnews-check.yml   manual helpers
 ```
 
 ## Configuration
@@ -124,15 +126,26 @@ Add the environment variables above. Render redeploys on every push to `main`.
 
 ### 3. Schedule (GitHub Actions)
 
-Add two repository secrets (**Settings → Secrets and variables → Actions**):
+The daily job runs on GitHub's runner, so it needs the same secrets the service uses. Add them under
+**Settings → Secrets and variables → Actions → Secrets**:
 
-- `APP_URL`: the Render URL, no trailing slash
-- `API_KEY`: exactly the same value as on Render
+| Secret | Value |
+| --- | --- |
+| `DATABASE_URL` | Supabase **transaction pooler** string (port 6543) |
+| `GNEWS_API_KEY`, `GEMINI_API_KEY` | your keys |
+| `KBNEWS_BOT_EMAIL`, `KBNEWS_BOT_PASSWORD` | the bot account |
 
-`.github/workflows/daily.yml` calls `/jobs/run` three times a day (01:30, 05:30 and 09:30 UTC, which
-is 07:00, 11:00 and 15:00 IST) and can also be started from **Actions → Daily news run → Run
-workflow**. Only the first run normally does any work; the others publish whatever is still missing. Its curl retries cover Render's cold start. GitHub pauses
-scheduled workflows after 60 days without repository activity.
+Optional **Variables** (same page): `GEMINI_MODEL`, `KBNEWS_BASE_URL`.
+
+`.github/workflows/daily.yml` runs at 01:30, 05:30 and 09:30 UTC (07:00, 11:00 and 15:00 IST) and can
+be started from **Actions → Daily news run → Run workflow**, optionally for a subset of categories.
+Only the first run normally does any work; the others publish whatever is still missing. The job turns
+red when any category fails. GitHub pauses scheduled workflows after 60 days without repository activity.
+
+`trigger-render.yml` (manual only) calls `/jobs/run` on the Render service, which needs `APP_URL` and
+`API_KEY` secrets. It is not used for the schedule.
+
+Run the pipeline from a terminal with `python -m app.cli run [--categories world,india]`.
 
 ## Running the job by hand
 
@@ -186,7 +199,7 @@ logged, because GNews takes its API key in the URL.
   `cloudflare-challenge`, Cloudflare (which sits in front of every `onrender.com` site) is screening
   this service's requests with a "Just a moment..." page that a script cannot solve. It comes and goes
   with the reputation of Render's shared outgoing addresses, so a run that is blocked one hour can pass
-  a few hours later. That is why the workflow tries three times a day (07:00, 11:00, 15:00 IST); later
+  a few hours later. That is why the workflow tries three times a day, and why the scheduled run happens on GitHub's runner (which kbNews let through when tested) (07:00, 11:00, 15:00 IST); later
   runs only do what is still missing. The client also wakes a sleeping kbNews with a patient warm-up
   (it stops waiting when it sees a challenge), sends a `news-generator/1.0` User-Agent, honours
   `Retry-After`, and after one failed login fails the other categories at once. To see whether
@@ -210,8 +223,6 @@ logged, because GNews takes its API key in the URL.
 
 ## Ideas for later
 
-- Run the pipeline inside the GitHub Actions job instead of on Render, if Cloudflare keeps blocking
-  Render's outgoing addresses (the reachability workflow shows whether GitHub's network is let through).
 - An admin page showing runs, articles, errors and a retry button (the tables already hold the data).
 - Feed recently posted headlines to the picker so it avoids repeating a running story.
 - Dedicated India and Maharashtra categories in kbNews.
