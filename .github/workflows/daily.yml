@@ -2,7 +2,12 @@ name: Daily news run
 
 on:
   schedule:
-    - cron: "30 1 * * *" # 07:00 IST (GitHub cron runs in UTC)
+    # GitHub cron runs in UTC. Three attempts a day: the pipeline only retries what has not been
+    # posted yet, so later runs do nothing once all three categories are published. They exist
+    # because kbNews's proxy sometimes blocks a run (Cloudflare challenge) and a later one gets through.
+    - cron: "30 1 * * *" # 07:00 IST
+    - cron: "30 5 * * *" # 11:00 IST
+    - cron: "30 9 * * *" # 15:00 IST
   workflow_dispatch: # manual "Run workflow" button
 
 jobs:
